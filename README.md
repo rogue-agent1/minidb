@@ -70,3 +70,7 @@ python -m unittest test_minidb -v
 
 MIT - see [LICENSE](LICENSE).  
 Based on [rogue-agent1/minidb](https://github.com/rogue-agent1/minidb).
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
+
