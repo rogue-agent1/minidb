@@ -29,7 +29,7 @@
 import json, os, time, tempfile
 from contextlib import contextmanager
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 _MISSING = object()  # sentinel to distinguish missing keys from stored None
 
@@ -54,6 +54,8 @@ class MiniDB:
         self.lock_path = path + ".lock"
         self.lock_timeout = lock_timeout
         self.data = {}
+        self._in_transaction = False  # True while inside a transaction block
+        self._tx_snapshot = None      # pre-transaction snapshot for rollback
         self._load()
 
     @contextmanager
@@ -116,6 +118,17 @@ class MiniDB:
                 self.data = json.load(f)
 
     def _save(self):
+        # Inside a transaction, suppress writes - commit() flushes once at the end
+        if self._in_transaction:
+            return
+        dir_name = os.path.dirname(self.path) or "."
+        with tempfile.NamedTemporaryFile("w", dir=dir_name, delete=False, suffix=".tmp") as tmp:
+            json.dump(self.data, tmp)
+            tmp_path = tmp.name
+        os.replace(tmp_path, self.path)
+
+    def _flush(self):
+        """Unconditional save - used by transaction commit to bypass the guard."""
         dir_name = os.path.dirname(self.path) or "."
         with tempfile.NamedTemporaryFile("w", dir=dir_name, delete=False, suffix=".tmp") as tmp:
             json.dump(self.data, tmp)
@@ -123,12 +136,54 @@ class MiniDB:
         os.replace(tmp_path, self.path)
 
     def _reload(self):
+        # Inside a transaction, don't reload from disk - work against the snapshot
+        if self._in_transaction:
+            return
         if os.path.exists(self.path):
             with open(self.path) as f:
                 self.data = json.load(f)
 
+    @contextmanager
+    def transaction(self):
+        """
+        Atomic transaction block. All writes are held in memory and flushed
+        in a single _save() on success. Any exception triggers a full rollback
+        to the pre-transaction state - nothing is written to disk.
+
+        Usage:
+            with db.transaction():
+                db.put("a", 1)
+                db.put("b", 2)
+                db.delete("c")
+            # All three ops committed atomically, or none if an exception occurred.
+
+        Transactions acquire the file lock for their entire duration.
+        Nested transactions are not supported and will raise RuntimeError.
+        """
+        if self._in_transaction:
+            raise RuntimeError("Nested transactions are not supported")
+
+        with self._lock():
+            self._reload()
+            self._tx_snapshot = {k: dict(v) for k, v in self.data.items()}
+            self._in_transaction = True
+            try:
+                yield
+                # Success - flush all buffered changes in one write
+                self._flush()
+            except Exception:
+                # Rollback - restore pre-transaction state, nothing written to disk
+                self.data = self._tx_snapshot
+                raise
+            finally:
+                self._in_transaction = False
+                self._tx_snapshot = None
+
     def put(self, key, value, ttl=None):
         expires_at = time.time() + ttl if ttl is not None else None
+        if self._in_transaction:
+            self.data[key] = {"v": value, "ts": time.time(), "exp": expires_at}
+            return
         with self._lock():
             self._reload()
             self.data[key] = {"v": value, "ts": time.time(), "exp": expires_at}
@@ -138,6 +193,16 @@ class MiniDB:
         if isinstance(items, dict):
             items = list(items.items())
         now = time.time()
+        if self._in_transaction:
+            for item in items:
+                if len(item) == 3:
+                    key, value, item_ttl = item
+                else:
+                    key, value = item
+                    item_ttl = ttl
+                expires_at = now + item_ttl if item_ttl is not None else None
+                self.data[key] = {"v": value, "ts": now, "exp": expires_at}
+            return
         with self._lock():
             self._reload()
             for item in items:
@@ -151,6 +216,14 @@ class MiniDB:
             self._save()
 
     def get(self, key, default=_MISSING):
+        if self._in_transaction:
+            e = self.data.get(key, _MISSING)
+            if e is _MISSING:
+                return None if default is _MISSING else default
+            if e.get("exp") is not None and time.time() > e["exp"]:
+                self.data.pop(key)
+                return None if default is _MISSING else default
+            return e["v"]
         with self._lock():
             self._reload()
             e = self.data.get(key, _MISSING)
@@ -164,6 +237,20 @@ class MiniDB:
 
     def get_many(self, keys):
         now = time.time()
+        if self._in_transaction:
+            result = {}
+            expired = []
+            for key in keys:
+                e = self.data.get(key)
+                if e is None:
+                    continue
+                if e.get("exp") is not None and now > e["exp"]:
+                    expired.append(key)
+                    continue
+                result[key] = e["v"]
+            for k in expired:
+                self.data.pop(k, None)
+            return result
         with self._lock():
             self._reload()
             result = {}
@@ -183,12 +270,19 @@ class MiniDB:
         return result
 
     def delete(self, key):
+        if self._in_transaction:
+            self.data.pop(key, None)
+            return
         with self._lock():
             self._reload()
             self.data.pop(key, None)
             self._save()
 
     def delete_many(self, keys):
+        if self._in_transaction:
+            for key in keys:
+                self.data.pop(key, None)
+            return
         with self._lock():
             self._reload()
             for key in keys:
@@ -196,6 +290,14 @@ class MiniDB:
             self._save()
 
     def exists(self, key):
+        if self._in_transaction:
+            e = self.data.get(key)
+            if e is None:
+                return False
+            if e.get("exp") is not None and time.time() > e["exp"]:
+                self.data.pop(key)
+                return False
+            return True
         with self._lock():
             self._reload()
             e = self.data.get(key)
@@ -208,6 +310,10 @@ class MiniDB:
             return True
 
     def keys(self):
+        if self._in_transaction:
+            now = time.time()
+            return [k for k, v in self.data.items()
+                    if v.get("exp") is None or now <= v["exp"]]
         with self._lock():
             self._reload()
             now = time.time()
@@ -215,6 +321,11 @@ class MiniDB:
                     if v.get("exp") is None or now <= v["exp"]]
 
     def scan(self, prefix=""):
+        if self._in_transaction:
+            now = time.time()
+            return {k: v["v"] for k, v in self.data.items()
+                    if k.startswith(prefix)
+                    and (v.get("exp") is None or now <= v["exp"])}
         with self._lock():
             self._reload()
             now = time.time()
@@ -226,6 +337,13 @@ class MiniDB:
         return len(self.keys())
 
     def compact(self):
+        if self._in_transaction:
+            now = time.time()
+            expired = [k for k, v in self.data.items()
+                       if v.get("exp") is not None and now > v["exp"]]
+            for k in expired:
+                self.data.pop(k)
+            return len(self.data)
         with self._lock():
             self._reload()
             now = time.time()
@@ -235,3 +353,6 @@ class MiniDB:
                 self.data.pop(k)
             self._save()
         return len(self.data)
+
+
+

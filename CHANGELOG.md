@@ -7,12 +7,25 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.3.0] - 2026-04-03
+
+### Added
+- `transaction()` context manager - groups multiple operations into a single atomic commit
+  - All writes held in memory during the block, flushed in one `_save()` on success
+  - Full rollback to pre-transaction state on any exception - nothing written to disk
+  - File lock held for the entire transaction duration
+  - All existing ops (`put`, `get`, `delete`, `scan`, etc.) work inside transactions
+  - Nested transactions raise `RuntimeError`
+- 9 new tests covering commit, rollback, single-write guarantee, TTL inside transactions, persistence after reload, and nested transaction guard
+
+---
+
 ## [0.2.0] - 2026-04-03
 
 Forked from [rogue-agent1/minidb](https://github.com/rogue-agent1/minidb).
 
 ### Added
-- TTL support - `put(key, value, ttl=seconds)` with lazy expiry on `get()`
+- TTL support-`put(key, value, ttl=seconds)` with lazy expiry on `get()`
 - Atomic writes - temp file + `os.replace()` prevents corruption on crash
 - File locking - `fcntl` (Unix), `msvcrt` (Windows), sentinel file fallback
 - `put_many()` - batch insert from dict, list of tuples, or list of 3-tuples with per-item TTL
