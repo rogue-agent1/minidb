@@ -343,5 +343,108 @@ class TestConcurrency(unittest.TestCase):
         self.assertEqual(errors, [])
 
 
+class TestTransactions(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = _db(self.tmp)
+
+    def tearDown(self):
+        for f in os.listdir(self.tmp):
+            os.remove(os.path.join(self.tmp, f))
+
+    def test_transaction_commits_all(self):
+        with self.db.transaction():
+            self.db.put("a", 1)
+            self.db.put("b", 2)
+            self.db.put("c", 3)
+        self.assertEqual(self.db.get("a"), 1)
+        self.assertEqual(self.db.get("b"), 2)
+        self.assertEqual(self.db.get("c"), 3)
+
+    def test_transaction_single_write(self):
+        """Entire transaction flushes in one _flush() call."""
+        flush_count = {"n": 0}
+        original_flush = self.db._flush
+        def counting_flush():
+            flush_count["n"] += 1
+            original_flush()
+        self.db._flush = counting_flush
+        with self.db.transaction():
+            self.db.put("a", 1)
+            self.db.put("b", 2)
+            self.db.put("c", 3)
+        self.assertEqual(flush_count["n"], 1)
+
+    def test_transaction_rollback_on_exception(self):
+        self.db.put("x", "original")
+        try:
+            with self.db.transaction():
+                self.db.put("x", "modified")
+                self.db.put("y", "new")
+                raise ValueError("simulated failure")
+        except ValueError:
+            pass
+        self.assertEqual(self.db.get("x"), "original")
+        self.assertIsNone(self.db.get("y"))
+
+    def test_transaction_nothing_written_on_rollback(self):
+        """Disk file must not change if transaction rolls back."""
+        self.db.put("x", "original")
+        snapshot_before = dict(self.db.data)
+        try:
+            with self.db.transaction():
+                self.db.put("x", "modified")
+                raise RuntimeError("abort")
+        except RuntimeError:
+            pass
+        # Reload from disk and verify unchanged
+        db2 = _db(self.tmp)
+        self.assertEqual(db2.get("x"), "original")
+
+    def test_transaction_rollback_restores_deletes(self):
+        self.db.put("x", "keep")
+        try:
+            with self.db.transaction():
+                self.db.delete("x")
+                raise ValueError("abort")
+        except ValueError:
+            pass
+        self.assertEqual(self.db.get("x"), "keep")
+
+    def test_transaction_mixed_ops(self):
+        self.db.put("a", 1)
+        self.db.put("b", 2)
+        with self.db.transaction():
+            self.db.put("a", 99)
+            self.db.delete("b")
+            self.db.put("c", 3)
+        self.assertEqual(self.db.get("a"), 99)
+        self.assertIsNone(self.db.get("b"))
+        self.assertEqual(self.db.get("c"), 3)
+
+    def test_transaction_with_ttl(self):
+        with self.db.transaction():
+            self.db.put("short", "v", ttl=0.1)
+            self.db.put("long", "v", ttl=5)
+        time.sleep(0.2)
+        self.assertIsNone(self.db.get("short"))
+        self.assertEqual(self.db.get("long"), "v")
+
+    def test_transaction_persists_after_reload(self):
+        with self.db.transaction():
+            self.db.put("a", 1)
+            self.db.put("b", 2)
+        db2 = _db(self.tmp)
+        self.assertEqual(db2.get("a"), 1)
+        self.assertEqual(db2.get("b"), 2)
+
+    def test_nested_transaction_raises(self):
+        with self.assertRaises(RuntimeError):
+            with self.db.transaction():
+                with self.db.transaction():
+                    pass
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

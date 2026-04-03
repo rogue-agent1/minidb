@@ -1,5 +1,8 @@
 # MiniDB
 
+![Version](https://img.shields.io/badge/version-0.3.0-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+
 A lightweight, zero-dependency key-value store backed by JSON. Single file, production-grade primitives.
 
 Forked from [rogue-agent1/minidb](https://github.com/rogue-agent1/minidb).
@@ -58,19 +61,40 @@ db.count()              # number of non-expired keys
 db.compact()            # purge expired keys, rewrite file, return remaining count
 ```
 
-## Running Tests
+# Transactions - atomic multi-key operations
+with db.transaction():
+    db.put("account:alice", 900)
+    db.put("account:bob", 1100)
+    # Both commit together, or neither if an exception occurs
+
+# Rollback on failure - nothing is written to disk
+try:
+    with db.transaction():
+        db.put("x", "new_value")
+        raise ValueError("something went wrong")
+except ValueError:
+    pass
+db.get("x")   # original value - rollback succeeded
+
+# All existing ops work inside transactions
+with db.transaction():
+    db.put_many({"a": 1, "b": 2})
+    db.delete("stale_key")
+    db.scan("user:")
+
+
 
 ```bash
 python -m unittest test_minidb -v
 ```
 
-40 tests across basic ops, persistence, TTL, batch ops, prefix scan, and concurrency.
+49 tests across basic ops, persistence, TTL, batch ops, prefix scan, concurrency, and transactions.
 
 ## License
 
 MIT - see [LICENSE](LICENSE).  
 Based on [rogue-agent1/minidb](https://github.com/rogue-agent1/minidb).
+
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md).
-
