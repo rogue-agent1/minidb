@@ -59,7 +59,6 @@ db.scan("user:")        # {"user:1": "alice", "user:2": "bob"}
 db.keys()               # all non-expired keys
 db.count()              # number of non-expired keys
 db.compact()            # purge expired keys, rewrite file, return remaining count
-```
 
 # SQL-like queries - filter, sort, project, limit
 db.put_many({
@@ -129,7 +128,7 @@ with db.transaction():
     db.delete("stale_key")
     db.scan("user:")
 
-
+```
 
 ```bash
 python -m unittest test_minidb -v
