@@ -26,10 +26,10 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
 
-import json, os, time, tempfile
+import json, os, time, tempfile, threading, atexit
 from contextlib import contextmanager
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 _MISSING = object()  # sentinel to distinguish missing keys from stored None
 
@@ -49,14 +49,86 @@ class LockError(Exception):
 
 
 class MiniDB:
-    def __init__(self, path="minidb.json", lock_timeout=5):
+    def __init__(self, path="minidb.json", lock_timeout=5,
+                 flush_interval=None, flush_ops=None):
         self.path = path
         self.lock_path = path + ".lock"
         self.lock_timeout = lock_timeout
         self.data = {}
         self._in_transaction = False  # True while inside a transaction block
         self._tx_snapshot = None      # pre-transaction snapshot for rollback
+
+        # Write buffering
+        self._flush_interval = flush_interval  # seconds between auto-flushes
+        self._flush_ops = flush_ops            # op count threshold for auto-flush
+        self._buffering = flush_interval is not None or flush_ops is not None
+        self._dirty = False                    # True if unflushed mutations exist
+        self._op_count = 0                     # mutations since last flush
+        self._timer = None                     # active threading.Timer
+        self._buffer_lock = threading.Lock()   # protects dirty/op_count/timer state
+
         self._load()
+
+        if self._buffering:
+            atexit.register(self.close)
+            if self._flush_interval is not None:
+                self._schedule_timer()
+
+    def _schedule_timer(self):
+        """Schedule the next interval flush. Cancels any existing timer first."""
+        if self._timer is not None:
+            self._timer.cancel()
+        self._timer = threading.Timer(self._flush_interval, self._timer_flush)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def _timer_flush(self):
+        """Called by the timer thread — flush if dirty, then reschedule."""
+        self.flush()
+        if self._flush_interval is not None:
+            self._schedule_timer()
+
+    def _mark_dirty(self):
+        """
+        Record a mutation. If buffering is off, does nothing (_save handles it).
+        If buffering is on, increments op count and triggers flush if threshold hit.
+        """
+        if not self._buffering:
+            return
+        with self._buffer_lock:
+            self._dirty = True
+            self._op_count += 1
+            if self._flush_ops is not None and self._op_count >= self._flush_ops:
+                self._do_flush()
+
+    def _do_flush(self):
+        """
+        Internal unconditional flush. Caller must hold _buffer_lock.
+        Resets dirty flag and op counter.
+        """
+        if not self._dirty:
+            return
+        self._flush()
+        self._dirty = False
+        self._op_count = 0
+
+    def flush(self):
+        """
+        Manually flush all buffered writes to disk immediately.
+        Safe to call at any time. No-op if nothing is buffered or dirty.
+        """
+        with self._buffer_lock:
+            self._do_flush()
+
+    def close(self):
+        """
+        Flush any remaining buffered writes and stop the background timer.
+        Called automatically on process exit via atexit when buffering is enabled.
+        """
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+        self.flush()
 
     @contextmanager
     def _lock(self):
@@ -118,8 +190,12 @@ class MiniDB:
                 self.data = json.load(f)
 
     def _save(self):
-        # Inside a transaction, suppress writes - commit() flushes once at the end
+        # Inside a transaction, suppress writes — commit() flushes once at the end
         if self._in_transaction:
+            return
+        # In buffering mode, mark dirty instead of writing immediately
+        if self._buffering:
+            self._mark_dirty()
             return
         dir_name = os.path.dirname(self.path) or "."
         with tempfile.NamedTemporaryFile("w", dir=dir_name, delete=False, suffix=".tmp") as tmp:
@@ -128,7 +204,7 @@ class MiniDB:
         os.replace(tmp_path, self.path)
 
     def _flush(self):
-        """Unconditional save - used by transaction commit to bypass the guard."""
+        """Unconditional write to disk — used by transactions and buffer flushes."""
         dir_name = os.path.dirname(self.path) or "."
         with tempfile.NamedTemporaryFile("w", dir=dir_name, delete=False, suffix=".tmp") as tmp:
             json.dump(self.data, tmp)
@@ -136,7 +212,7 @@ class MiniDB:
         os.replace(tmp_path, self.path)
 
     def _reload(self):
-        # Inside a transaction, don't reload from disk - work against the snapshot
+        # Inside a transaction, don't reload from disk — work against the snapshot
         if self._in_transaction:
             return
         if os.path.exists(self.path):
@@ -148,7 +224,7 @@ class MiniDB:
         """
         Atomic transaction block. All writes are held in memory and flushed
         in a single _save() on success. Any exception triggers a full rollback
-        to the pre-transaction state - nothing is written to disk.
+        to the pre-transaction state — nothing is written to disk.
 
         Usage:
             with db.transaction():
@@ -169,10 +245,10 @@ class MiniDB:
             self._in_transaction = True
             try:
                 yield
-                # Success - flush all buffered changes in one write
+                # Success — flush all buffered changes in one write
                 self._flush()
             except Exception:
-                # Rollback - restore pre-transaction state, nothing written to disk
+                # Rollback — restore pre-transaction state, nothing written to disk
                 self.data = self._tx_snapshot
                 raise
             finally:
@@ -353,6 +429,7 @@ class MiniDB:
                 self.data.pop(k)
             self._save()
         return len(self.data)
+
 
 
 

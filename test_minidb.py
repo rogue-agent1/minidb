@@ -1,7 +1,7 @@
 # test_minidb.py
 #
 # MIT License
-# Copyright (c) 2026 John (JT) Thornton 
+# Copyright (c) 2026 John (JT) Thornton
 # See LICENSE file for full license text.
 
 import unittest, threading, os, time, tempfile
@@ -446,5 +446,103 @@ class TestTransactions(unittest.TestCase):
                     pass
 
 
+class TestWriteBuffering(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        for f in os.listdir(self.tmp):
+            os.remove(os.path.join(self.tmp, f))
+
+    def test_default_no_buffering(self):
+        """Without flush params, writes go straight to disk as before."""
+        db = _db(self.tmp)
+        db.put("k", "v")
+        db2 = _db(self.tmp)
+        self.assertEqual(db2.get("k"), "v")
+
+    def test_buffered_write_not_on_disk_immediately(self):
+        """With buffering on, put() should NOT write to disk immediately."""
+        db = _db(self.tmp, flush_interval=60, flush_ops=100)
+        db.put("k", "v")
+        # File should not exist yet — nothing flushed
+        self.assertFalse(os.path.exists(db.path))
+        db.close()
+
+    def test_manual_flush_writes_to_disk(self):
+        """flush() forces an immediate write."""
+        db = _db(self.tmp, flush_interval=60, flush_ops=100)
+        db.put("k", "v")
+        db.flush()
+        db2 = _db(self.tmp)
+        self.assertEqual(db2.get("k"), "v")
+        db.close()
+
+    def test_flush_on_op_count(self):
+        """Hitting flush_ops threshold triggers automatic flush."""
+        db = _db(self.tmp, flush_ops=3)
+        db.put("a", 1)
+        db.put("b", 2)
+        self.assertFalse(os.path.exists(db.path))  # not yet
+        db.put("c", 3)  # 3rd op — triggers flush
+        self.assertTrue(os.path.exists(db.path))
+        db2 = _db(self.tmp)
+        self.assertEqual(db2.get("a"), 1)
+        self.assertEqual(db2.get("c"), 3)
+        db.close()
+
+    def test_flush_on_interval(self):
+        """Timer triggers flush after flush_interval seconds."""
+        db = _db(self.tmp, flush_interval=0.2)
+        db.put("k", "v")
+        self.assertFalse(os.path.exists(db.path))
+        time.sleep(0.4)  # wait for timer to fire
+        self.assertTrue(os.path.exists(db.path))
+        db2 = _db(self.tmp)
+        self.assertEqual(db2.get("k"), "v")
+        db.close()
+
+    def test_close_flushes_remaining(self):
+        """close() flushes any dirty data before stopping the timer."""
+        db = _db(self.tmp, flush_interval=60, flush_ops=100)
+        db.put("k", "v")
+        db.close()
+        db2 = _db(self.tmp)
+        self.assertEqual(db2.get("k"), "v")
+
+    def test_flush_ops_resets_after_flush(self):
+        """Op counter resets after flush so the next batch works correctly."""
+        db = _db(self.tmp, flush_ops=3)
+        db.put("a", 1)
+        db.put("b", 2)
+        db.put("c", 3)  # flush #1
+        db.put("d", 4)
+        db.put("e", 5)
+        db.put("f", 6)  # flush #2
+        db2 = _db(self.tmp)
+        self.assertEqual(db2.get("f"), 6)
+        db.close()
+
+    def test_manual_flush_noop_when_clean(self):
+        """flush() on a non-dirty buffer does not error."""
+        db = _db(self.tmp, flush_interval=60)
+        db.flush()  # nothing dirty — should not raise
+        db.close()
+
+    def test_buffering_compatible_with_transactions(self):
+        """Transactions still commit atomically when buffering is enabled."""
+        db = _db(self.tmp, flush_interval=60, flush_ops=100)
+        with db.transaction():
+            db.put("a", 1)
+            db.put("b", 2)
+        # Transaction commit calls _flush directly — bypasses buffer
+        db2 = _db(self.tmp)
+        self.assertEqual(db2.get("a"), 1)
+        self.assertEqual(db2.get("b"), 2)
+        db.close()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
