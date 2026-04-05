@@ -1,6 +1,6 @@
 # MiniDB
 
-![Version](https://img.shields.io/badge/version-0.3.0-blue)
+![Version](https://img.shields.io/badge/version-0.4.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 A lightweight, zero-dependency key-value store backed by JSON. Single file, production-grade primitives.
@@ -61,7 +61,17 @@ db.count()              # number of non-expired keys
 db.compact()            # purge expired keys, rewrite file, return remaining count
 ```
 
-# Transactions - atomic multi-key operations
+# Write buffering - batch disk writes for high-throughput workloads
+db = MiniDB("mydb.json", flush_interval=5)     # flush every 5 seconds
+db = MiniDB("mydb.json", flush_ops=100)         # flush every 100 mutations
+db = MiniDB("mydb.json", flush_interval=5, flush_ops=100)  # whichever comes first
+
+db.put("a", 1)   # held in memory, not written to disk yet
+db.put("b", 2)   # still buffered
+db.flush()       # force immediate write
+db.close()       # flush remaining buffer and stop timer (also called on exit)
+
+
 with db.transaction():
     db.put("account:alice", 900)
     db.put("account:bob", 1100)
@@ -88,7 +98,7 @@ with db.transaction():
 python -m unittest test_minidb -v
 ```
 
-49 tests across basic ops, persistence, TTL, batch ops, prefix scan, concurrency, and transactions.
+58 tests across basic ops, persistence, TTL, batch ops, prefix scan, concurrency, transactions, and write buffering.
 
 ## License
 
@@ -98,3 +108,4 @@ Based on [rogue-agent1/minidb](https://github.com/rogue-agent1/minidb).
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md).
+
