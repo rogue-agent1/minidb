@@ -7,6 +7,20 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.4.0] - 2026-04-05
+
+### Added
+- Write buffering with flush interval - optional `flush_interval` and `flush_ops` parameters on `MiniDB()`
+  - `flush_interval=N` flushes to disk every N seconds via a daemon `threading.Timer`
+  - `flush_ops=N` flushes after every N mutations, whichever threshold is hit first
+  - `db.flush()` - manual immediate flush
+  - `db.close()` - flushes remaining buffer and stops the timer; registered via `atexit` automatically
+  - Default behavior (no params) unchanged - writes remain synchronous and immediate
+  - Fully compatible with transactions - transaction commits bypass the buffer and flush directly
+- 9 new tests covering interval flush, op-count flush, manual flush, close-on-exit, counter reset, and transaction compatibility
+
+---
+
 ## [0.3.0] - 2026-04-03
 
 ### Added
@@ -25,7 +39,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 Forked from [rogue-agent1/minidb](https://github.com/rogue-agent1/minidb).
 
 ### Added
-- TTL support-`put(key, value, ttl=seconds)` with lazy expiry on `get()`
+- TTL support - `put(key, value, ttl=seconds)` with lazy expiry on `get()`
 - Atomic writes - temp file + `os.replace()` prevents corruption on crash
 - File locking - `fcntl` (Unix), `msvcrt` (Windows), sentinel file fallback
 - `put_many()` - batch insert from dict, list of tuples, or list of 3-tuples with per-item TTL
@@ -51,3 +65,4 @@ Original implementation by [rogue-agent1](https://github.com/rogue-agent1/minidb
 
 - JSON-backed key-value store
 - `put`, `get`, `delete`, `keys`, `scan`, `count`
+
