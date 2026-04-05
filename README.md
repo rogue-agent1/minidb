@@ -59,7 +59,6 @@ db.scan("user:")        # {"user:1": "alice", "user:2": "bob"}
 db.keys()               # all non-expired keys
 db.count()              # number of non-expired keys
 db.compact()            # purge expired keys, rewrite file, return remaining count
-```
 
 # Write buffering - batch disk writes for high-throughput workloads
 db = MiniDB("mydb.json", flush_interval=5)     # flush every 5 seconds
@@ -92,7 +91,7 @@ with db.transaction():
     db.delete("stale_key")
     db.scan("user:")
 
-
+```
 
 ```bash
 python -m unittest test_minidb -v
