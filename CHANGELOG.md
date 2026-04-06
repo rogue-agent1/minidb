@@ -7,6 +7,23 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.6.0] - 2026-04-05
+
+### Added
+- `Q` query predicate builder - cleaner alternative to raw lambdas for `where=` parameter
+  - 12 operators across four categories:
+    - Comparison: `eq`, `gt`, `gte`, `lt`, `lte`, `ne`
+    - Membership: `in`, `nin`
+    - String: `contains`, `startswith`, `endswith`
+    - Existence: `exists`, `isnull`
+  - Logical combinators: `&` (AND), `|` (OR), `~` (NOT), chainable arbitrarily
+  - Fully compatible with `query()`, `update_where()`, and `delete_where()`
+  - `__repr__` for readable debugging
+  - Lives in `minidb.py` alongside `MiniDB` - no new files, no new dependencies
+- 26 new tests covering all operators, combinators, integration with query methods, and error handling
+
+---
+
 ## [0.5.0] - 2026-04-05
 
 Inspired by the `select()`, `update()`, and `order_by` conventions from [rogue-agent1/minidb-engine](https://github.com/rogue-agent1/minidb-engine), with schema validation done properly.
@@ -88,4 +105,3 @@ Original implementation by [rogue-agent1](https://github.com/rogue-agent1/minidb
 
 - JSON-backed key-value store
 - `put`, `get`, `delete`, `keys`, `scan`, `count`
-
