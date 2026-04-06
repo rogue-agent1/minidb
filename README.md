@@ -18,6 +18,7 @@ Forked from [rogue-agent1/minidb](https://github.com/rogue-agent1/minidb).
 - **Query builder** - `Q` objects with 12 operators, AND/OR/NOT combinators, no lambdas required
 - **Batch operations** - `put_many`, `get_many`, `delete_many` with a single write per batch
 - **Prefix scan** - namespace your keys and query by prefix
+- **SQL-like query** - query, update_where, delete_where, and order_by 
 - **Stored `None`** - distinguishes a missing key from a key with a `None` value
 - **Zero dependencies** - stdlib only (`json`, `os`, `time`, `tempfile`, `threading`, `fcntl`/`msvcrt`)
 
