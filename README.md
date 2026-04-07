@@ -1,6 +1,6 @@
 # MiniDB
 
-![Version](https://img.shields.io/badge/version-0.6.0-blue)
+![Version](https://img.shields.io/badge/version-0.7.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 A lightweight, zero-dependency key-value store backed by JSON. Single file, production-grade primitives.
@@ -14,13 +14,13 @@ Forked from [rogue-agent1/minidb](https://github.com/rogue-agent1/minidb).
 - **File locking** - safe for concurrent processes (`fcntl` on Unix, `msvcrt` on Windows, sentinel fallback)
 - **Transactions** - atomic multi-op blocks with full rollback on failure
 - **Write buffering** - optional interval or op-count flushing for high-throughput workloads
+- **Memory-mapped reads** - `mmap` for efficient reads on large files, configurable threshold
 - **SQL-like queries** - `query()`, `update_where()`, `delete_where()` with `where`, `order_by`, `limit`, and column projection
 - **Query builder** - `Q` objects with 12 operators, AND/OR/NOT combinators, no lambdas required
 - **Batch operations** - `put_many`, `get_many`, `delete_many` with a single write per batch
 - **Prefix scan** - namespace your keys and query by prefix
-- **SQL-like query** - query, update_where, delete_where, and order_by 
 - **Stored `None`** - distinguishes a missing key from a key with a `None` value
-- **Zero dependencies** - stdlib only (`json`, `os`, `time`, `tempfile`, `threading`, `fcntl`/`msvcrt`)
+- **Zero dependencies** - stdlib only (`json`, `os`, `time`, `tempfile`, `threading`, `mmap`, `fcntl`/`msvcrt`)
 
 ## Installation
 
@@ -217,13 +217,29 @@ db.flush()      # force immediate write
 db.close()      # flush remaining buffer and stop timer (auto-called on exit)
 ```
 
+### Memory-Mapped Reads
+
+```python
+# Default: mmap kicks in for files >= 1MB
+db = MiniDB("mydb.json")
+
+# Always use mmap regardless of file size
+db = MiniDB("mydb.json", mmap_threshold=None)
+
+# Disable mmap entirely - always use standard file read
+db = MiniDB("mydb.json", mmap_threshold=0)
+
+# Custom threshold - mmap for files >= 512KB
+db = MiniDB("mydb.json", mmap_threshold=524_288)
+```
+
 ## Running Tests
 
 ```bash
 python -m unittest test_minidb -v
 ```
 
-114 tests across basic ops, persistence, TTL, batch ops, prefix scan, concurrency, transactions, write buffering, SQL-like queries, and Q query builder.
+124 tests across basic ops, persistence, TTL, batch ops, prefix scan, concurrency, transactions, write buffering, SQL-like queries, Q query builder, and memory-mapped reads.
 
 ## License
 

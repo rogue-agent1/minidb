@@ -7,6 +7,24 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.7.0] - 2026-04-06
+
+### Added
+- Memory-mapped reads via stdlib `mmap`
+  - `mmap_threshold=1_048_576` (default) - mmap used for files >= 1MB
+  - `mmap_threshold=None` - always use mmap regardless of file size
+  - `mmap_threshold=0` - disable mmap, always use standard file read
+  - `_reload_mmap()` - maps file into virtual address space, reads bytes, decodes UTF-8, parses JSON
+  - `_reload_standard()` - original file read path, used for small files or when mmap is disabled
+  - Cross-platform: uses `ACCESS_READ` flag on all platforms
+  - Compatible with transactions, TTL, write buffering, and all existing ops
+- 10 new tests covering threshold routing, data integrity parity, large file correctness, always-on/always-off modes, transaction/TTL compatibility, empty file handling, and default threshold value
+
+### Fixed
+- `_load()` now guards against empty files (previously raised `JSONDecodeError` on an empty path)
+
+---
+
 ## [0.6.0] - 2026-04-05
 
 ### Added
