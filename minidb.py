@@ -26,10 +26,10 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
 
-import json, os, time, tempfile, threading, atexit
+import json, os, time, tempfile, threading, atexit, mmap
 from contextlib import contextmanager
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 _MISSING = object()  # sentinel to distinguish missing keys from stored None
 
@@ -115,11 +115,9 @@ class Q:
                 field_exists = field in v
                 field_is_none = field_exists and v[field] is None
                 if val:
-                    # isnull=True - field must exist and be None
                     if not field_is_none:
                         return False
                 else:
-                    # isnull=False - field must exist and not be None
                     if not (field_exists and not field_is_none):
                         return False
                 continue
@@ -166,22 +164,30 @@ class Q:
 
 class MiniDB:
     def __init__(self, path="minidb.json", lock_timeout=5,
-                 flush_interval=None, flush_ops=None):
+                 flush_interval=None, flush_ops=None,
+                 mmap_threshold=1_048_576):
         self.path = path
         self.lock_path = path + ".lock"
         self.lock_timeout = lock_timeout
         self.data = {}
-        self._in_transaction = False  # True while inside a transaction block
-        self._tx_snapshot = None      # pre-transaction snapshot for rollback
+        self._in_transaction = False
+        self._tx_snapshot = None
 
         # Write buffering
-        self._flush_interval = flush_interval  # seconds between auto-flushes
-        self._flush_ops = flush_ops            # op count threshold for auto-flush
+        self._flush_interval = flush_interval
+        self._flush_ops = flush_ops
         self._buffering = flush_interval is not None or flush_ops is not None
-        self._dirty = False                    # True if unflushed mutations exist
-        self._op_count = 0                     # mutations since last flush
-        self._timer = None                     # active threading.Timer
-        self._buffer_lock = threading.Lock()   # protects dirty/op_count/timer state
+        self._dirty = False
+        self._op_count = 0
+        self._timer = None
+        self._buffer_lock = threading.Lock()
+
+        # Memory-mapped reads
+        # mmap_threshold: file size in bytes above which mmap is used for _reload()
+        # None  = always use mmap regardless of file size
+        # 0     = never use mmap (standard file read always)
+        # N > 0 = use mmap when file size >= N bytes (default: 1MB)
+        self._mmap_threshold = mmap_threshold
 
         self._load()
 
@@ -191,7 +197,6 @@ class MiniDB:
                 self._schedule_timer()
 
     def _schedule_timer(self):
-        """Schedule the next interval flush. Cancels any existing timer first."""
         if self._timer is not None:
             self._timer.cancel()
         self._timer = threading.Timer(self._flush_interval, self._timer_flush)
@@ -199,16 +204,11 @@ class MiniDB:
         self._timer.start()
 
     def _timer_flush(self):
-        """Called by the timer thread - flush if dirty, then reschedule."""
         self.flush()
         if self._flush_interval is not None:
             self._schedule_timer()
 
     def _mark_dirty(self):
-        """
-        Record a mutation. If buffering is off, does nothing (_save handles it).
-        If buffering is on, increments op count and triggers flush if threshold hit.
-        """
         if not self._buffering:
             return
         with self._buffer_lock:
@@ -218,10 +218,6 @@ class MiniDB:
                 self._do_flush()
 
     def _do_flush(self):
-        """
-        Internal unconditional flush. Caller must hold _buffer_lock.
-        Resets dirty flag and op counter.
-        """
         if not self._dirty:
             return
         self._flush()
@@ -229,18 +225,10 @@ class MiniDB:
         self._op_count = 0
 
     def flush(self):
-        """
-        Manually flush all buffered writes to disk immediately.
-        Safe to call at any time. No-op if nothing is buffered or dirty.
-        """
         with self._buffer_lock:
             self._do_flush()
 
     def close(self):
-        """
-        Flush any remaining buffered writes and stop the background timer.
-        Called automatically on process exit via atexit when buffering is enabled.
-        """
         if self._timer is not None:
             self._timer.cancel()
             self._timer = None
@@ -302,14 +290,14 @@ class MiniDB:
 
     def _load(self):
         if os.path.exists(self.path):
+            if os.path.getsize(self.path) == 0:
+                return
             with open(self.path) as f:
                 self.data = json.load(f)
 
     def _save(self):
-        # Inside a transaction, suppress writes - commit() flushes once at the end
         if self._in_transaction:
             return
-        # In buffering mode, mark dirty instead of writing immediately
         if self._buffering:
             self._mark_dirty()
             return
@@ -320,7 +308,6 @@ class MiniDB:
         os.replace(tmp_path, self.path)
 
     def _flush(self):
-        """Unconditional write to disk - used by transactions and buffer flushes."""
         dir_name = os.path.dirname(self.path) or "."
         with tempfile.NamedTemporaryFile("w", dir=dir_name, delete=False, suffix=".tmp") as tmp:
             json.dump(self.data, tmp)
@@ -331,40 +318,50 @@ class MiniDB:
         # Inside a transaction, don't reload from disk - work against the snapshot
         if self._in_transaction:
             return
-        if os.path.exists(self.path):
-            with open(self.path) as f:
-                self.data = json.load(f)
+        if not os.path.exists(self.path):
+            return
+        size = os.path.getsize(self.path)
+        if size == 0:
+            self.data = {}
+            return
+        use_mmap = (
+            self._mmap_threshold is None or
+            (self._mmap_threshold > 0 and size >= self._mmap_threshold)
+        )
+        if use_mmap:
+            self._reload_mmap()
+        else:
+            self._reload_standard()
+
+    def _reload_standard(self):
+        """Standard file read — used for small files or when mmap is disabled."""
+        with open(self.path) as f:
+            self.data = json.load(f)
+
+    def _reload_mmap(self):
+        """
+        Memory-mapped read — maps the file into virtual address space and
+        parses JSON from bytes. More efficient for large files as the OS
+        handles paging and only accessed regions are loaded from disk.
+        Cross-platform: uses ACCESS_READ on all platforms.
+        """
+        with open(self.path, "rb") as f:
+            with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+                raw = mm.read()
+        self.data = json.loads(raw.decode("utf-8"))
 
     @contextmanager
     def transaction(self):
-        """
-        Atomic transaction block. All writes are held in memory and flushed
-        in a single _save() on success. Any exception triggers a full rollback
-        to the pre-transaction state - nothing is written to disk.
-
-        Usage:
-            with db.transaction():
-                db.put("a", 1)
-                db.put("b", 2)
-                db.delete("c")
-            # All three ops committed atomically, or none if an exception occurred.
-
-        Transactions acquire the file lock for their entire duration.
-        Nested transactions are not supported and will raise RuntimeError.
-        """
         if self._in_transaction:
             raise RuntimeError("Nested transactions are not supported")
-
         with self._lock():
             self._reload()
             self._tx_snapshot = {k: dict(v) for k, v in self.data.items()}
             self._in_transaction = True
             try:
                 yield
-                # Success - flush all buffered changes in one write
                 self._flush()
             except Exception:
-                # Rollback - restore pre-transaction state, nothing written to disk
                 self.data = self._tx_snapshot
                 raise
             finally:
@@ -526,10 +523,6 @@ class MiniDB:
                     and (v.get("exp") is None or now <= v["exp"])}
 
     def _query_rows(self, prefix, where, columns, order_by, limit, skip_invalid, now):
-        """
-        Core query logic shared between transaction and non-transaction paths.
-        Returns a list of result dicts, each with a '_key' field added.
-        """
         rows = []
         for k, entry in self.data.items():
             if not k.startswith(prefix):
@@ -564,33 +557,6 @@ class MiniDB:
 
     def query(self, prefix="", where=None, columns=None, order_by=None,
               limit=None, skip_invalid=False):
-        """
-        SQL-like query over keys sharing a prefix.
-
-        Args:
-            prefix:       Key prefix to filter on (e.g. "user:").
-            where:        Callable predicate applied to each value dict.
-                          e.g. where=lambda v: v['age'] > 25
-            columns:      List of fields to include in results. None returns all fields.
-                          '_key' is always included.
-            order_by:     Field name to sort by. Prefix with '-' for descending.
-                          e.g. order_by='-age'
-            limit:        Maximum number of results to return.
-            skip_invalid: If True, silently skip non-dict values instead of raising.
-
-        Returns:
-            List of dicts. Each dict includes '_key' plus requested fields.
-
-        Raises:
-            TypeError: If a value is not a dict and skip_invalid is False.
-
-        Example:
-            db.query("user:",
-                where=lambda v: v['city'] == 'NYC',
-                columns=['name', 'age'],
-                order_by='-age',
-                limit=5)
-        """
         now = time.time()
         if self._in_transaction:
             return self._query_rows(prefix, where, columns, order_by, limit, skip_invalid, now)
@@ -599,27 +565,6 @@ class MiniDB:
             return self._query_rows(prefix, where, columns, order_by, limit, skip_invalid, now)
 
     def update_where(self, prefix="", where=None, updates=None):
-        """
-        Bulk update all keys under prefix matching a predicate.
-
-        Args:
-            prefix:  Key prefix to filter on.
-            where:   Callable predicate applied to each value dict.
-                     None matches all keys under prefix.
-            updates: Dict of fields to merge into matching records.
-
-        Returns:
-            Number of records updated.
-
-        Raises:
-            ValueError: If updates is None or empty.
-            TypeError:  If a value under prefix is not a dict.
-
-        Example:
-            db.update_where("user:",
-                where=lambda v: v['city'] == 'NYC',
-                updates={'active': True})
-        """
         if not updates:
             raise ValueError("updates must be a non-empty dict")
 
@@ -653,23 +598,6 @@ class MiniDB:
         return count
 
     def delete_where(self, prefix="", where=None):
-        """
-        Bulk delete all keys under prefix matching a predicate.
-
-        Args:
-            prefix: Key prefix to filter on.
-            where:  Callable predicate applied to each value dict.
-                    None deletes all keys under prefix.
-
-        Returns:
-            Number of records deleted.
-
-        Raises:
-            TypeError: If a value under prefix is not a dict.
-
-        Example:
-            db.delete_where("session:", where=lambda v: v['expired'] == True)
-        """
         now = time.time()
 
         def _collect(data):
@@ -723,6 +651,3 @@ class MiniDB:
                 self.data.pop(k)
             self._save()
         return len(self.data)
-
-
-

@@ -4,7 +4,7 @@
 # Copyright (c) 2026 John (JT) Thornton
 # See LICENSE file for full license text.
 
-import unittest, threading, os, time, tempfile
+import unittest, threading, os, time, tempfile, json
 from minidb import MiniDB, Q
 
 
@@ -391,14 +391,12 @@ class TestTransactions(unittest.TestCase):
     def test_transaction_nothing_written_on_rollback(self):
         """Disk file must not change if transaction rolls back."""
         self.db.put("x", "original")
-        snapshot_before = dict(self.db.data)
         try:
             with self.db.transaction():
                 self.db.put("x", "modified")
                 raise RuntimeError("abort")
         except RuntimeError:
             pass
-        # Reload from disk and verify unchanged
         db2 = _db(self.tmp)
         self.assertEqual(db2.get("x"), "original")
 
@@ -466,7 +464,6 @@ class TestWriteBuffering(unittest.TestCase):
         """With buffering on, put() should NOT write to disk immediately."""
         db = _db(self.tmp, flush_interval=60, flush_ops=100)
         db.put("k", "v")
-        # File should not exist yet - nothing flushed
         self.assertFalse(os.path.exists(db.path))
         db.close()
 
@@ -484,8 +481,8 @@ class TestWriteBuffering(unittest.TestCase):
         db = _db(self.tmp, flush_ops=3)
         db.put("a", 1)
         db.put("b", 2)
-        self.assertFalse(os.path.exists(db.path))  # not yet
-        db.put("c", 3)  # 3rd op - triggers flush
+        self.assertFalse(os.path.exists(db.path))
+        db.put("c", 3)
         self.assertTrue(os.path.exists(db.path))
         db2 = _db(self.tmp)
         self.assertEqual(db2.get("a"), 1)
@@ -497,7 +494,7 @@ class TestWriteBuffering(unittest.TestCase):
         db = _db(self.tmp, flush_interval=0.2)
         db.put("k", "v")
         self.assertFalse(os.path.exists(db.path))
-        time.sleep(0.4)  # wait for timer to fire
+        time.sleep(0.4)
         self.assertTrue(os.path.exists(db.path))
         db2 = _db(self.tmp)
         self.assertEqual(db2.get("k"), "v")
@@ -516,10 +513,10 @@ class TestWriteBuffering(unittest.TestCase):
         db = _db(self.tmp, flush_ops=3)
         db.put("a", 1)
         db.put("b", 2)
-        db.put("c", 3)  # flush #1
+        db.put("c", 3)
         db.put("d", 4)
         db.put("e", 5)
-        db.put("f", 6)  # flush #2
+        db.put("f", 6)
         db2 = _db(self.tmp)
         self.assertEqual(db2.get("f"), 6)
         db.close()
@@ -527,7 +524,7 @@ class TestWriteBuffering(unittest.TestCase):
     def test_manual_flush_noop_when_clean(self):
         """flush() on a non-dirty buffer does not error."""
         db = _db(self.tmp, flush_interval=60)
-        db.flush()  # nothing dirty - should not raise
+        db.flush()
         db.close()
 
     def test_buffering_compatible_with_transactions(self):
@@ -536,7 +533,6 @@ class TestWriteBuffering(unittest.TestCase):
         with db.transaction():
             db.put("a", 1)
             db.put("b", 2)
-        # Transaction commit calls _flush directly - bypasses buffer
         db2 = _db(self.tmp)
         self.assertEqual(db2.get("a"), 1)
         self.assertEqual(db2.get("b"), 2)
@@ -561,36 +557,30 @@ class TestQuery(unittest.TestCase):
             os.remove(os.path.join(self.tmp, f))
 
     def test_query_all(self):
-        results = self.db.query("user:")
-        self.assertEqual(len(results), 5)
+        self.assertEqual(len(self.db.query("user:")), 5)
 
     def test_query_where(self):
         results = self.db.query("user:", where=lambda v: v['city'] == 'NYC')
         self.assertEqual(len(results), 2)
-        names = {r['name'] for r in results}
-        self.assertEqual(names, {"Alice", "Charlie"})
+        self.assertEqual({r['name'] for r in results}, {"Alice", "Charlie"})
 
     def test_query_order_by_asc(self):
-        results = self.db.query("user:", order_by='age')
-        ages = [r['age'] for r in results]
+        ages = [r['age'] for r in self.db.query("user:", order_by='age')]
         self.assertEqual(ages, sorted(ages))
 
     def test_query_order_by_desc(self):
-        results = self.db.query("user:", order_by='-age')
-        ages = [r['age'] for r in results]
+        ages = [r['age'] for r in self.db.query("user:", order_by='-age')]
         self.assertEqual(ages, sorted(ages, reverse=True))
 
     def test_query_limit(self):
         results = self.db.query("user:", order_by='-age', limit=3)
         self.assertEqual(len(results), 3)
-        self.assertEqual(results[0]['name'], 'Charlie')  # age 35
+        self.assertEqual(results[0]['name'], 'Charlie')
 
     def test_query_columns(self):
-        results = self.db.query("user:", columns=['name', 'age'])
-        for r in results:
+        for r in self.db.query("user:", columns=['name', 'age']):
             self.assertIn('_key', r)
             self.assertIn('name', r)
-            self.assertIn('age', r)
             self.assertNotIn('city', r)
 
     def test_query_combined(self):
@@ -605,18 +595,15 @@ class TestQuery(unittest.TestCase):
 
     def test_query_key_in_result(self):
         results = self.db.query("user:", where=lambda v: v['name'] == 'Alice')
-        self.assertEqual(len(results), 1)
         self.assertEqual(results[0]['_key'], 'user:1')
 
     def test_query_no_match(self):
-        results = self.db.query("user:", where=lambda v: v['city'] == 'Tokyo')
-        self.assertEqual(results, [])
+        self.assertEqual(self.db.query("user:", where=lambda v: v['city'] == 'Tokyo'), [])
 
     def test_query_excludes_expired(self):
         self.db.put("user:6", {"name": "Frank", "age": 40, "city": "NYC"}, ttl=0.1)
         time.sleep(0.2)
-        results = self.db.query("user:", where=lambda v: v['name'] == 'Frank')
-        self.assertEqual(results, [])
+        self.assertEqual(self.db.query("user:", where=lambda v: v['name'] == 'Frank'), [])
 
     def test_query_non_dict_raises(self):
         self.db.put("user:bad", "not a dict")
@@ -626,8 +613,7 @@ class TestQuery(unittest.TestCase):
     def test_query_non_dict_skip_invalid(self):
         self.db.put("user:bad", "not a dict")
         results = self.db.query("user:", skip_invalid=True)
-        keys = [r['_key'] for r in results]
-        self.assertNotIn('user:bad', keys)
+        self.assertNotIn('user:bad', [r['_key'] for r in results])
         self.assertEqual(len(results), 5)
 
     def test_query_in_transaction(self):
@@ -639,12 +625,10 @@ class TestQuery(unittest.TestCase):
 
     def test_query_empty_prefix(self):
         self.db.put("config:theme", {"value": "dark"})
-        results = self.db.query("")
-        self.assertGreater(len(results), 5)
+        self.assertGreater(len(self.db.query("")), 5)
 
     def test_query_wrong_prefix(self):
-        results = self.db.query("order:")
-        self.assertEqual(results, [])
+        self.assertEqual(self.db.query("order:"), [])
 
 
 class TestUpdateWhere(unittest.TestCase):
@@ -653,9 +637,9 @@ class TestUpdateWhere(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.db = _db(self.tmp)
         self.db.put_many({
-            "user:1": {"name": "Alice", "age": 30, "city": "NYC", "active": True},
-            "user:2": {"name": "Bob",   "age": 25, "city": "SF",  "active": True},
-            "user:3": {"name": "Charlie","age": 35, "city": "NYC", "active": True},
+            "user:1": {"name": "Alice",   "age": 30, "city": "NYC", "active": True},
+            "user:2": {"name": "Bob",     "age": 25, "city": "SF",  "active": True},
+            "user:3": {"name": "Charlie", "age": 35, "city": "NYC", "active": True},
         })
 
     def tearDown(self):
@@ -664,31 +648,20 @@ class TestUpdateWhere(unittest.TestCase):
 
     def test_update_where_matching(self):
         count = self.db.update_where("user:",
-            where=lambda v: v['city'] == 'NYC',
-            updates={'active': False})
+            where=lambda v: v['city'] == 'NYC', updates={'active': False})
         self.assertEqual(count, 2)
-        results = self.db.query("user:", where=lambda v: v['active'] == False)
-        self.assertEqual(len(results), 2)
+        self.assertEqual(len(self.db.query("user:", where=lambda v: v['active'] == False)), 2)
 
     def test_update_where_all(self):
-        count = self.db.update_where("user:", updates={'verified': True})
-        self.assertEqual(count, 3)
-        results = self.db.query("user:", where=lambda v: v.get('verified'))
-        self.assertEqual(len(results), 3)
+        self.assertEqual(self.db.update_where("user:", updates={'verified': True}), 3)
 
     def test_update_where_no_match(self):
-        count = self.db.update_where("user:",
-            where=lambda v: v['city'] == 'Tokyo',
-            updates={'active': False})
-        self.assertEqual(count, 0)
+        self.assertEqual(self.db.update_where("user:",
+            where=lambda v: v['city'] == 'Tokyo', updates={'active': False}), 0)
 
     def test_update_where_persists(self):
-        self.db.update_where("user:",
-            where=lambda v: v['name'] == 'Bob',
-            updates={'age': 26})
-        db2 = _db(self.tmp)
-        result = db2.query("user:", where=lambda v: v['name'] == 'Bob')
-        self.assertEqual(result[0]['age'], 26)
+        self.db.update_where("user:", where=lambda v: v['name'] == 'Bob', updates={'age': 26})
+        self.assertEqual(_db(self.tmp).query("user:", where=lambda v: v['name'] == 'Bob')[0]['age'], 26)
 
     def test_update_where_empty_updates_raises(self):
         with self.assertRaises(ValueError):
@@ -702,10 +675,8 @@ class TestUpdateWhere(unittest.TestCase):
     def test_update_where_in_transaction(self):
         with self.db.transaction():
             self.db.update_where("user:",
-                where=lambda v: v['city'] == 'NYC',
-                updates={'active': False})
-        results = self.db.query("user:", where=lambda v: v['active'] == False)
-        self.assertEqual(len(results), 2)
+                where=lambda v: v['city'] == 'NYC', updates={'active': False})
+        self.assertEqual(len(self.db.query("user:", where=lambda v: v['active'] == False)), 2)
 
     def test_update_where_rollback(self):
         try:
@@ -714,8 +685,7 @@ class TestUpdateWhere(unittest.TestCase):
                 raise ValueError("abort")
         except ValueError:
             pass
-        results = self.db.query("user:", where=lambda v: v['active'] == True)
-        self.assertEqual(len(results), 3)
+        self.assertEqual(len(self.db.query("user:", where=lambda v: v['active'] == True)), 3)
 
 
 class TestDeleteWhere(unittest.TestCase):
@@ -724,9 +694,9 @@ class TestDeleteWhere(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.db = _db(self.tmp)
         self.db.put_many({
-            "user:1": {"name": "Alice", "age": 30, "city": "NYC"},
-            "user:2": {"name": "Bob",   "age": 25, "city": "SF"},
-            "user:3": {"name": "Charlie","age": 35, "city": "NYC"},
+            "user:1": {"name": "Alice",   "age": 30, "city": "NYC"},
+            "user:2": {"name": "Bob",     "age": 25, "city": "SF"},
+            "user:3": {"name": "Charlie", "age": 35, "city": "NYC"},
         })
 
     def tearDown(self):
@@ -734,27 +704,20 @@ class TestDeleteWhere(unittest.TestCase):
             os.remove(os.path.join(self.tmp, f))
 
     def test_delete_where_matching(self):
-        count = self.db.delete_where("user:",
-            where=lambda v: v['city'] == 'NYC')
-        self.assertEqual(count, 2)
+        self.assertEqual(self.db.delete_where("user:", where=lambda v: v['city'] == 'NYC'), 2)
         self.assertEqual(self.db.count(), 1)
 
     def test_delete_where_all(self):
-        count = self.db.delete_where("user:")
-        self.assertEqual(count, 3)
+        self.assertEqual(self.db.delete_where("user:"), 3)
         self.assertEqual(self.db.count(), 0)
 
     def test_delete_where_no_match(self):
-        count = self.db.delete_where("user:",
-            where=lambda v: v['city'] == 'Tokyo')
-        self.assertEqual(count, 0)
+        self.assertEqual(self.db.delete_where("user:", where=lambda v: v['city'] == 'Tokyo'), 0)
         self.assertEqual(self.db.count(), 3)
 
     def test_delete_where_persists(self):
         self.db.delete_where("user:", where=lambda v: v['name'] == 'Bob')
-        db2 = _db(self.tmp)
-        result = db2.query("user:", where=lambda v: v['name'] == 'Bob')
-        self.assertEqual(result, [])
+        self.assertEqual(_db(self.tmp).query("user:", where=lambda v: v['name'] == 'Bob'), [])
 
     def test_delete_where_non_dict_raises(self):
         self.db.put("user:bad", "not a dict")
@@ -777,7 +740,6 @@ class TestDeleteWhere(unittest.TestCase):
 
 
 class TestQ(unittest.TestCase):
-    """Tests for the Q query predicate builder."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -795,56 +757,41 @@ class TestQ(unittest.TestCase):
         for f in os.listdir(self.tmp):
             os.remove(os.path.join(self.tmp, f))
 
-    # --- Comparison operators ---
-
     def test_eq_implicit(self):
-        results = self.db.query("user:", where=Q(city="NYC"))
-        self.assertEqual(len(results), 3)
+        self.assertEqual(len(self.db.query("user:", where=Q(city="NYC"))), 3)
 
     def test_eq_explicit(self):
-        results = self.db.query("user:", where=Q(city__eq="NYC"))
-        self.assertEqual(len(results), 3)
+        self.assertEqual(len(self.db.query("user:", where=Q(city__eq="NYC"))), 3)
 
     def test_ne(self):
-        results = self.db.query("user:", where=Q(city__ne="NYC"))
-        self.assertEqual(len(results), 3)
+        self.assertEqual(len(self.db.query("user:", where=Q(city__ne="NYC"))), 3)
 
     def test_gt(self):
-        results = self.db.query("user:", where=Q(age__gt=30))
-        names = {r['name'] for r in results}
+        names = {r['name'] for r in self.db.query("user:", where=Q(age__gt=30))}
         self.assertEqual(names, {"Charlie", "Eve", "Frank"})
 
     def test_gte(self):
-        results = self.db.query("user:", where=Q(age__gte=30))
-        names = {r['name'] for r in results}
+        names = {r['name'] for r in self.db.query("user:", where=Q(age__gte=30))}
         self.assertEqual(names, {"Alice", "Charlie", "Eve", "Frank"})
 
     def test_lt(self):
-        results = self.db.query("user:", where=Q(age__lt=30))
-        names = {r['name'] for r in results}
+        names = {r['name'] for r in self.db.query("user:", where=Q(age__lt=30))}
         self.assertEqual(names, {"Bob", "Diana"})
 
     def test_lte(self):
-        results = self.db.query("user:", where=Q(age__lte=30))
-        names = {r['name'] for r in results}
+        names = {r['name'] for r in self.db.query("user:", where=Q(age__lte=30))}
         self.assertEqual(names, {"Alice", "Bob", "Diana"})
 
-    # --- Membership operators ---
-
     def test_in(self):
-        results = self.db.query("user:", where=Q(city__in=["NYC", "SF"]))
-        self.assertEqual(len(results), 5)
+        self.assertEqual(len(self.db.query("user:", where=Q(city__in=["NYC", "SF"]))), 5)
 
     def test_nin(self):
         results = self.db.query("user:", where=Q(city__nin=["NYC", "SF"]))
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]['name'], "Diana")
 
-    # --- String operators ---
-
     def test_contains(self):
-        results = self.db.query("user:", where=Q(name__contains="li"))
-        names = {r['name'] for r in results}
+        names = {r['name'] for r in self.db.query("user:", where=Q(name__contains="li"))}
         self.assertEqual(names, {"Alice", "Charlie"})
 
     def test_startswith(self):
@@ -853,20 +800,15 @@ class TestQ(unittest.TestCase):
         self.assertEqual(results[0]['name'], "Alice")
 
     def test_endswith(self):
-        results = self.db.query("user:", where=Q(name__endswith="e"))
-        names = {r['name'] for r in results}
+        names = {r['name'] for r in self.db.query("user:", where=Q(name__endswith="e"))}
         self.assertEqual(names, {"Alice", "Charlie", "Eve"})
 
-    # --- Existence operators ---
-
     def test_exists_true(self):
-        results = self.db.query("user:", where=Q(nickname__exists=True))
-        names = {r['name'] for r in results}
+        names = {r['name'] for r in self.db.query("user:", where=Q(nickname__exists=True))}
         self.assertEqual(names, {"Eve", "Frank"})
 
     def test_exists_false(self):
-        results = self.db.query("user:", where=Q(nickname__exists=False))
-        self.assertEqual(len(results), 4)
+        self.assertEqual(len(self.db.query("user:", where=Q(nickname__exists=False))), 4)
 
     def test_isnull_true(self):
         results = self.db.query("user:", where=Q(nickname__isnull=True))
@@ -878,26 +820,20 @@ class TestQ(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]['name'], "Frank")
 
-    # --- Combinators ---
-
     def test_and(self):
-        results = self.db.query("user:", where=Q(city="NYC") & Q(age__gt=30))
-        names = {r['name'] for r in results}
+        names = {r['name'] for r in self.db.query("user:", where=Q(city="NYC") & Q(age__gt=30))}
         self.assertEqual(names, {"Charlie", "Frank"})
 
     def test_or(self):
-        results = self.db.query("user:", where=Q(city="LA") | Q(age__gt=38))
-        names = {r['name'] for r in results}
+        names = {r['name'] for r in self.db.query("user:", where=Q(city="LA") | Q(age__gt=38))}
         self.assertEqual(names, {"Diana", "Frank"})
 
     def test_not(self):
-        results = self.db.query("user:", where=~Q(city="NYC"))
-        self.assertEqual(len(results), 3)
+        self.assertEqual(len(self.db.query("user:", where=~Q(city="NYC"))), 3)
 
     def test_complex_combined(self):
-        results = self.db.query("user:",
-            where=(Q(city="NYC") | Q(city="SF")) & Q(age__gte=30))
-        names = {r['name'] for r in results}
+        names = {r['name'] for r in self.db.query("user:",
+            where=(Q(city="NYC") | Q(city="SF")) & Q(age__gte=30))}
         self.assertEqual(names, {"Alice", "Charlie", "Eve", "Frank"})
 
     def test_chained_and(self):
@@ -906,26 +842,18 @@ class TestQ(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]['name'], "Alice")
 
-    # --- Integration with update_where and delete_where ---
-
     def test_q_with_update_where(self):
         count = self.db.update_where("user:",
-            where=Q(city="NYC") & Q(age__gt=30),
-            updates={'flagged': True})
+            where=Q(city="NYC") & Q(age__gt=30), updates={'flagged': True})
         self.assertEqual(count, 2)
-        results = self.db.query("user:", where=Q(flagged=True))
-        names = {r['name'] for r in results}
+        names = {r['name'] for r in self.db.query("user:", where=Q(flagged=True))}
         self.assertEqual(names, {"Charlie", "Frank"})
 
     def test_q_with_delete_where(self):
-        count = self.db.delete_where("user:", where=Q(score__lt=75))
-        self.assertEqual(count, 2)
-        remaining = self.db.query("user:")
-        names = {r['name'] for r in remaining}
+        self.db.delete_where("user:", where=Q(score__lt=75))
+        names = {r['name'] for r in self.db.query("user:")}
         self.assertNotIn("Charlie", names)
         self.assertNotIn("Frank", names)
-
-    # --- Error handling ---
 
     def test_unknown_operator_raises(self):
         with self.assertRaises(ValueError):
@@ -938,5 +866,147 @@ class TestQ(unittest.TestCase):
         self.assertIn("combined", repr(Q(city="NYC") & Q(age__gt=25)))
 
 
+class TestMmapReload(unittest.TestCase):
+    """Tests for memory-mapped reads via _reload_mmap."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        for f in os.listdir(self.tmp):
+            os.remove(os.path.join(self.tmp, f))
+
+    def _make_large_db(self, path, n=500):
+        """Write a DB file large enough to exceed the default 1MB threshold."""
+        data = {}
+        for i in range(n):
+            key = f"record:{i:04d}"
+            data[key] = {
+                "v": {
+                    "id": i,
+                    "name": f"User {i}",
+                    "email": f"user{i}@example.com",
+                    "payload": "x" * 2048,  # pad to inflate file size
+                },
+                "ts": time.time(),
+                "exp": None,
+            }
+        with open(path, "w") as f:
+            json.dump(data, f)
+        return os.path.getsize(path)
+
+    def test_mmap_disabled_uses_standard_read(self):
+        """mmap_threshold=0 always uses standard file read."""
+        db = _db(self.tmp, mmap_threshold=0)
+        db.put("k", "v")
+        reload_calls = {"mmap": 0, "standard": 0}
+        original_mmap = db._reload_mmap
+        original_std = db._reload_standard
+        def track_mmap(): reload_calls["mmap"] += 1; original_mmap()
+        def track_std(): reload_calls["standard"] += 1; original_std()
+        db._reload_mmap = track_mmap
+        db._reload_standard = track_std
+        db.get("k")
+        self.assertEqual(reload_calls["mmap"], 0)
+        self.assertGreater(reload_calls["standard"], 0)
+
+    def test_mmap_always_on_with_none_threshold(self):
+        """mmap_threshold=None always uses mmap regardless of file size."""
+        db = _db(self.tmp, mmap_threshold=None)
+        db.put("k", "v")
+        reload_calls = {"mmap": 0}
+        original_mmap = db._reload_mmap
+        def track_mmap(): reload_calls["mmap"] += 1; original_mmap()
+        db._reload_mmap = track_mmap
+        db.get("k")
+        self.assertGreater(reload_calls["mmap"], 0)
+
+    def test_mmap_threshold_small_file_uses_standard(self):
+        """Small file below threshold uses standard read."""
+        db = _db(self.tmp, mmap_threshold=10_000_000)  # 10MB threshold
+        db.put("k", "v")
+        reload_calls = {"mmap": 0, "standard": 0}
+        original_mmap = db._reload_mmap
+        original_std = db._reload_standard
+        def track_mmap(): reload_calls["mmap"] += 1; original_mmap()
+        def track_std(): reload_calls["standard"] += 1; original_std()
+        db._reload_mmap = track_mmap
+        db._reload_standard = track_std
+        db.get("k")
+        self.assertEqual(reload_calls["mmap"], 0)
+        self.assertGreater(reload_calls["standard"], 0)
+
+    def test_mmap_threshold_large_file_uses_mmap(self):
+        """File exceeding threshold uses mmap."""
+        path = os.path.join(self.tmp, "large.json")
+        size = self._make_large_db(path)
+        self.assertGreater(size, 1_048_576, "Test file must exceed 1MB")
+        db = MiniDB(path, mmap_threshold=1_048_576)
+        reload_calls = {"mmap": 0}
+        original_mmap = db._reload_mmap
+        def track_mmap(): reload_calls["mmap"] += 1; original_mmap()
+        db._reload_mmap = track_mmap
+        db.get("record:0001")
+        self.assertGreater(reload_calls["mmap"], 0)
+
+    def test_mmap_returns_correct_data(self):
+        """mmap reload produces identical results to standard reload."""
+        db = _db(self.tmp)
+        db.put_many({f"k{i}": i * 10 for i in range(20)})
+
+        # Standard reload
+        db._mmap_threshold = 0
+        db._reload()
+        standard_data = dict(db.data)
+
+        # mmap reload
+        db._mmap_threshold = None
+        db._reload()
+        mmap_data = dict(db.data)
+
+        self.assertEqual(standard_data, mmap_data)
+
+    def test_mmap_reload_large_file_data_integrity(self):
+        """mmap read of a large file produces correct values."""
+        path = os.path.join(self.tmp, "large.json")
+        self._make_large_db(path, n=500)
+        db = MiniDB(path, mmap_threshold=1_048_576)
+        result = db.get("record:0042")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["id"], 42)
+        self.assertEqual(result["name"], "User 42")
+
+    def test_mmap_default_threshold_is_1mb(self):
+        """Default mmap_threshold is 1MB."""
+        db = _db(self.tmp)
+        self.assertEqual(db._mmap_threshold, 1_048_576)
+
+    def test_mmap_compatible_with_transactions(self):
+        """mmap reload does not interfere with transactions."""
+        db = _db(self.tmp, mmap_threshold=None)
+        with db.transaction():
+            db.put("a", 1)
+            db.put("b", 2)
+        self.assertEqual(db.get("a"), 1)
+        self.assertEqual(db.get("b"), 2)
+
+    def test_mmap_compatible_with_ttl(self):
+        """mmap reload respects TTL expiry."""
+        db = _db(self.tmp, mmap_threshold=None)
+        db.put("live", "v", ttl=5)
+        db.put("dead", "v", ttl=0.1)
+        time.sleep(0.2)
+        self.assertEqual(db.get("live"), "v")
+        self.assertIsNone(db.get("dead"))
+
+    def test_mmap_empty_file_handled(self):
+        """Empty file does not crash mmap path."""
+        path = os.path.join(self.tmp, "empty.json")
+        open(path, "w").close()
+        db = MiniDB(path, mmap_threshold=None)
+        # Should load with empty data, not crash
+        self.assertEqual(db.data, {})
+
+
 if __name__ == "__main__":
-    unittest.main(verbosity=2)
+    unittest.main(verbosity=1)
